@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+
+function json_string_escape {
+    cat | sed -E 's/("|\\)/\\\1/g'
+}
+function env_to_json {
+    printf '{'
+    comma="no"
+    for key in "$@"; do
+        value="${!key}"
+        ([ "$comma" = "yes" ] && printf ',') || comma="yes"
+        printf '"%s":"%s"' "$(echo "$key" | json_string_escape)" "$(echo "$value" | json_string_escape)"
+    done
+    printf '}'
+}
+function args_to_json {
+    printf '['
+    comma="no"
+    for arg in "$@"; do
+        ([ "$comma" = "yes" ] && printf ',') || comma="yes"
+        printf '"%s"' "$(echo "$arg" | json_string_escape)"
+    done
+    printf ']'
+}
+
+# get the absolute path of the executable
+self_path=$(cd -P -- "$(dirname -- "$0")" && pwd -P) && self_path="$self_path/$(basename -- "$0")"
+# resolve symlinks
+while [ -h "$self_path" ]; do
+    dir=$(dirname -- "$self_path")
+    sym=$(readlink -- "$self_path")
+    self_path=$(cd -- "$dir" && cd -- $(dirname -- "$sym") && pwd)/$(basename -- "$sym")
+done
+
+export NARWHAL_ENGINE_HOME=$(dirname -- "$(dirname -- "$self_path")")
+
+if [ -z "$NARWHAL_HOME" ]; then
+	export NARWHAL_HOME=$(dirname -- "$(dirname -- "$NARWHAL_ENGINE_HOME")")
+fi
+
+export NARWHAL_PID="$$"
+
+env_json="$(env_to_json $(env | grep -oE '^[^=]+'))"
+args_json="$(args_to_json $0 "$@")"
+bootstrap_js_raw="$(cat "$NARWHAL_ENGINE_HOME/bootstrap.js")"
+bootstrap_js="_env=$env_json;_args=$args_json;$bootstrap_js_raw"
+
+stdout_fifo="/tmp/narwhal-photoshop-$NARWHAL_PID-stdout"
+stderr_fifo="/tmp/narwhal-photoshop-$NARWHAL_PID-stderr"
+stdin_fifo="/tmp/narwhal-photoshop-$NARWHAL_PID-stdin"
+
+
+rm -f "$stdout_fifo"
+rm -f "$stderr_fifo"
+rm -f "$stdin_fifo"
+
+mkfifo "$stdout_fifo"
+mkfifo "$stderr_fifo"
+mkfifo "$stdin_fifo"
+
+cat "$stdout_fifo" > /dev/stdout &
+cat "$stderr_fifo" > /dev/stderr &
+# cat /dev/stdin > "$stderr_fifo" &
+
+bootstrap_applescript=$(cat "$NARWHAL_ENGINE_HOME/bootstrap.applescript")
+
+if [ "$NARWHAL_DEBUGGER" ]; then
+    if [ "$NARWHAL_DEBUGGER" = "always" ]; then
+        bootstrap_applescript=$(echo "$bootstrap_applescript" | sed 's/--DEBUGGER/show debugger before running/')
+    else
+        bootstrap_applescript=$(echo "$bootstrap_applescript" | sed 's/--DEBUGGER/show debugger on runtime error/')
+    fi
+fi
+
+if [ "$#" -gt 0 ]; then
+    echo "$bootstrap_applescript" | osascript - "$bootstrap_js" > /dev/null
+else
+    # experimental
+    while printf 'photoshop> ' && read line; do
+        echo "$bootstrap_applescript" | osascript - "$line" > /dev/null
+    done
+fi
+
+rm "$stdout_fifo"
+rm "$stderr_fifo"
+rm "$stdin_fifo"
